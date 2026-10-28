@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.res.Configuration
 import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
@@ -114,6 +115,21 @@ class KeyboardService : Service() {
         return START_NOT_STICKY
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // Screen rotated: redraw for the new size and keep everything on screen.
+        handler.post {
+            if (!running) return@post
+            if (keyboard != null) {
+                removeKeyboard()
+                showKeyboard()
+            } else if (bubble != null) {
+                removeBubble()
+                showBubble()
+            }
+        }
+    }
+
     override fun onDestroy() {
         running = false
         releaseEverything()
@@ -179,11 +195,13 @@ class KeyboardService : Service() {
         prefs.edit().putBoolean(Prefs.EXPANDED, true).apply()
         kbParams = overlayParams(WindowManager.LayoutParams.MATCH_PARENT).apply {
             x = 0
-            y = prefs.getInt(Prefs.KEYBOARD_Y, resources.displayMetrics.heightPixels / 2)
+            y = prefs.getInt(yKey(), Int.MAX_VALUE) // MAX = not moved yet: sit at the bottom
         }
         val view = buildKeyboard()
         keyboard = view
         wm?.addView(view, kbParams)
+        // Once it has a size, make sure it's fully on screen.
+        view.post { keepKeyboardOnScreen() }
         updateStatus()
         relabel()
     }
@@ -203,7 +221,10 @@ class KeyboardService : Service() {
         prefs.edit().putBoolean(Prefs.EXPANDED, false).apply()
         bubbleParams = overlayParams(WindowManager.LayoutParams.WRAP_CONTENT).apply {
             x = prefs.getInt(Prefs.BUBBLE_X, dp(12))
-            y = prefs.getInt(Prefs.BUBBLE_Y, resources.displayMetrics.heightPixels / 3)
+            y = prefs.getInt(Prefs.BUBBLE_Y, screenHeight() / 3)
+            val size = dp(48)
+            x = x.coerceIn(0, (screenWidth() - size).coerceAtLeast(0))
+            y = y.coerceIn(0, (screenHeight() - size).coerceAtLeast(0))
         }
         val size = dp(48)
         val b = TextView(this).apply {
@@ -233,7 +254,11 @@ class KeyboardService : Service() {
 
     private fun buildKeyboard(): LinearLayout {
         val prefs = Prefs.get(this)
-        val keyH = prefs.getInt(Prefs.KEY_HEIGHT, 40).coerceIn(28, 60)
+        val chosenH = prefs.getInt(Prefs.KEY_HEIGHT, 40).coerceIn(28, 60)
+        // In landscape, shrink keys if needed so the keyboard uses at most ~60% of the screen height.
+        val screenHdp = screenHeight() / resources.displayMetrics.density
+        val fitH = ((screenHdp * 0.6f - 34f) / Layout.rows.size).toInt()
+        val keyH = if (isLandscape()) chosenH.coerceAtMost(fitH.coerceAtLeast(24)) else chosenH
         val opacity = prefs.getInt(Prefs.OPACITY, 92).coerceIn(40, 100)
 
         val root = LinearLayout(this).apply {
@@ -505,11 +530,12 @@ class KeyboardService : Service() {
                     touchY = e.rawY
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    kbParams.y = (startY + (e.rawY - touchY).toInt()).coerceAtLeast(0)
+                    val maxY = (screenHeight() - root.height).coerceAtLeast(0)
+                    kbParams.y = (startY + (e.rawY - touchY).toInt()).coerceIn(0, maxY)
                     wm?.updateViewLayout(root, kbParams)
                 }
                 MotionEvent.ACTION_UP -> {
-                    Prefs.get(this@KeyboardService).edit().putInt(Prefs.KEYBOARD_Y, kbParams.y).apply()
+                    Prefs.get(this@KeyboardService).edit().putInt(yKey(), kbParams.y).apply()
                     v.performClick()
                 }
             }
@@ -556,6 +582,25 @@ class KeyboardService : Service() {
                 }
             }
             return true
+        }
+    }
+
+    private fun isLandscape() = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+    /** Portrait and landscape each remember their own keyboard position. */
+    private fun yKey() = if (isLandscape()) Prefs.KEYBOARD_Y + "_landscape" else Prefs.KEYBOARD_Y
+
+    private fun screenHeight(): Int = wm?.currentWindowMetrics?.bounds?.height() ?: resources.displayMetrics.heightPixels
+
+    private fun screenWidth(): Int = wm?.currentWindowMetrics?.bounds?.width() ?: resources.displayMetrics.widthPixels
+
+    private fun keepKeyboardOnScreen() {
+        val root = keyboard ?: return
+        val maxY = (screenHeight() - root.height).coerceAtLeast(0)
+        val y = kbParams.y.coerceIn(0, maxY)
+        if (y != kbParams.y) {
+            kbParams.y = y
+            wm?.updateViewLayout(root, kbParams)
         }
     }
 
