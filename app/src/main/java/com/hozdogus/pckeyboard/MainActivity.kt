@@ -2,6 +2,7 @@ package com.hozdogus.pckeyboard
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -16,6 +17,7 @@ import android.util.TypedValue
 import android.view.View
 import android.view.WindowInsets
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
@@ -37,6 +39,7 @@ class MainActivity : Activity() {
     private lateinit var stepPermission: Step
     private lateinit var stepOverlay: Step
     private lateinit var mainButton: Button
+    private lateinit var layoutsBox: LinearLayout
 
     private val refreshLoop = object : Runnable {
         override fun run() {
@@ -94,6 +97,25 @@ class MainActivity : Activity() {
         root.addView(space(20))
 
         // Appearance
+        // Layouts
+        root.addView(text("Layouts", 18f, Color.WHITE, bold = true))
+        root.addView(
+            text(
+                "Make your own: pick which buttons and sticks appear and drag them where you want. " +
+                    "Tip: open your game first, then tap ☰ on the keyboard → New layout or Edit this layout, " +
+                    "so you can place buttons right over it.",
+                13f, muted,
+            ),
+        )
+        root.addView(space(8))
+        layoutsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(layoutsBox)
+        root.addView(Button(this).apply {
+            text = "New layout"
+            setOnClickListener { newLayout() }
+        })
+        root.addView(space(20))
+
         root.addView(text("Appearance", 18f, Color.WHITE, bold = true))
         root.addView(space(8))
         val look = cardLayout()
@@ -111,6 +133,8 @@ class MainActivity : Activity() {
                         "• Ctrl, Alt, Shift and Win: hold them while pressing another key, tap once to " +
                         "use for the next key only, or hold on their own for half a second to lock them on.\n" +
                         "• Drag the top bar to move the keyboard. — shrinks it to a bubble you can drag; tap the bubble to bring it back.\n" +
+                        "• Gamepad buttons and analog sticks (in custom layouts) work in many emulators and games, " +
+                        "but not all: some games only accept a real controller.\n" +
                         "• Keys go to whatever app is on screen. If you need to type into a text box, tap the box first.",
                     14f, Color.WHITE,
                 ),
@@ -132,6 +156,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        renderLayouts()
         ShizukuLink.connect()
         handler.post(refreshLoop)
     }
@@ -169,6 +194,102 @@ class MainActivity : Activity() {
         step.status.setTextColor(if (done) good else warn)
         step.button.visibility = if (done) View.GONE else View.VISIBLE
         step.button.isEnabled = enabled
+    }
+
+    // ---- layouts ----
+
+    private fun renderLayouts() {
+        layoutsBox.removeAllViews()
+        val active = LayoutStore.active(this)
+        val layouts = LayoutStore.load(this)
+        val fullActive = active.isEmpty() || layouts.none { it.id == active }
+
+        fun row(name: String, inUse: Boolean, buttons: List<Pair<String, () -> Unit>>) {
+            val box = cardLayout()
+            box.addView(text(if (inUse) "$name  ✓ in use" else name, 16f, if (inUse) good else Color.WHITE, bold = true))
+            val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            for ((label, action) in buttons) {
+                line.addView(Button(this).apply {
+                    text = label
+                    textSize = 12f
+                    setOnClickListener { action() }
+                }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            }
+            box.addView(line)
+            layoutsBox.addView(box)
+            layoutsBox.addView(space(8))
+        }
+
+        row("Full keyboard", fullActive, if (fullActive) emptyList() else listOf("Use" to { use("") }))
+        for (l in layouts) {
+            val inUse = l.id == active
+            val buttons = mutableListOf<Pair<String, () -> Unit>>()
+            if (!inUse) buttons += "Use" to { use(l.id) }
+            buttons += "Edit" to { edit(l.id) }
+            buttons += "Rename" to { rename(l) }
+            buttons += "Delete" to { delete(l) }
+            row("${l.name} (${l.controls.size})", inUse, buttons)
+        }
+    }
+
+    private fun use(id: String) {
+        LayoutStore.setActive(this, id)
+        if (KeyboardService.running) {
+            startService(Intent(this, KeyboardService::class.java).setAction(KeyboardService.ACTION_RELOAD))
+        }
+        renderLayouts()
+    }
+
+    private fun edit(id: String) {
+        if (!Settings.canDrawOverlays(this)) {
+            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+            return
+        }
+        startForegroundService(
+            Intent(this, KeyboardService::class.java)
+                .setAction(KeyboardService.ACTION_EDIT)
+                .putExtra(KeyboardService.EXTRA_LAYOUT, id),
+        )
+    }
+
+    private fun newLayout() {
+        val made = CustomLayout(name = "Layout ${LayoutStore.load(this).size + 1}")
+        LayoutStore.upsert(this, made)
+        renderLayouts()
+        edit(made.id)
+    }
+
+    private fun rename(l: CustomLayout) {
+        val input = EditText(this).apply {
+            setText(l.name)
+            setSelection(l.name.length)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Rename layout")
+            .setView(input)
+            .setPositiveButton("Save") { _, _ ->
+                val name = input.text.toString().trim().ifEmpty { l.name }
+                LayoutStore.upsert(this, l.copy(name = name.take(30)))
+                renderLayouts()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun delete(l: CustomLayout) {
+        AlertDialog.Builder(this)
+            .setTitle("Delete ${l.name}?")
+            .setMessage("This can't be undone.")
+            .setPositiveButton("Delete") { _, _ ->
+                val wasActive = LayoutStore.active(this) == l.id
+                LayoutStore.delete(this, l.id)
+                if (wasActive && KeyboardService.running) {
+                    startService(Intent(this, KeyboardService::class.java).setAction(KeyboardService.ACTION_RELOAD))
+                }
+                renderLayouts()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun toggleKeyboard() {

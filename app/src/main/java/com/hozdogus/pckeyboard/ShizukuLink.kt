@@ -52,7 +52,7 @@ object ShizukuLink {
             .daemon(false)
             .processNameSuffix("keys")
             .debuggable(false)
-            .version(1)
+            .version(2) // bump whenever KeyInjectorService changes
     }
 
     private val connection = object : ServiceConnection {
@@ -111,6 +111,28 @@ object ShizukuLink {
                 inj.injectKey(action, keyCode, meta, downTime, repeat)
             } catch (t: Throwable) {
                 // Shizuku went away; the dead listener will update the state.
+            }
+        }
+    }
+
+    /** A key press from a gamepad (or any other input source). */
+    fun sendFrom(action: Int, keyCode: Int, meta: Int, downTime: Long, source: Int) {
+        val inj = injector ?: return
+        worker.execute {
+            try {
+                inj.injectKeyFrom(action, keyCode, meta, downTime, 0, source)
+            } catch (t: Throwable) {
+            }
+        }
+    }
+
+    /** Moves an analog stick: 0 = left, 1 = right. */
+    fun sendStick(stick: Int, x: Float, y: Float) {
+        val inj = injector ?: return
+        worker.execute {
+            try {
+                inj.injectStick(stick, x, y)
+            } catch (t: Throwable) {
             }
         }
     }

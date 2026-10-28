@@ -6,6 +6,7 @@ import android.view.InputDevice
 import android.view.InputEvent
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
+import android.view.MotionEvent
 import org.lsposed.hiddenapibypass.HiddenApiBypass
 import java.lang.reflect.Method
 import kotlin.system.exitProcess
@@ -51,15 +52,49 @@ class KeyInjectorService : IKeyInjector.Stub() {
         exitProcess(0)
     }
 
-    override fun injectKey(action: Int, keyCode: Int, metaState: Int, downTime: Long, repeat: Int): Boolean {
+    override fun injectKey(action: Int, keyCode: Int, metaState: Int, downTime: Long, repeat: Int): Boolean =
+        injectKeyFrom(action, keyCode, metaState, downTime, repeat, InputDevice.SOURCE_KEYBOARD)
+
+    override fun injectKeyFrom(
+        action: Int, keyCode: Int, metaState: Int, downTime: Long, repeat: Int, source: Int,
+    ): Boolean {
         val event = KeyEvent(
             downTime, SystemClock.uptimeMillis(), action, keyCode, repeat, metaState,
-            KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD,
+            KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, source,
         )
-        return try {
-            inject.invoke(target, event, 0) as? Boolean ?: false // 0 = don't wait
-        } catch (t: Throwable) {
-            false
-        }
+        return send(event)
+    }
+
+    // Both sticks are sent together, like a real controller.
+    private val axes = FloatArray(4) // left x, left y, right x, right y
+    private val stickStart = SystemClock.uptimeMillis()
+
+    override fun injectStick(stick: Int, x: Float, y: Float): Boolean {
+        val i = if (stick == 1) 2 else 0
+        axes[i] = x.coerceIn(-1f, 1f)
+        axes[i + 1] = y.coerceIn(-1f, 1f)
+        val props = arrayOf(MotionEvent.PointerProperties().apply {
+            id = 0
+            toolType = MotionEvent.TOOL_TYPE_UNKNOWN
+        })
+        val coords = arrayOf(MotionEvent.PointerCoords().apply {
+            setAxisValue(MotionEvent.AXIS_X, axes[0])
+            setAxisValue(MotionEvent.AXIS_Y, axes[1])
+            setAxisValue(MotionEvent.AXIS_Z, axes[2])
+            setAxisValue(MotionEvent.AXIS_RZ, axes[3])
+        })
+        val event = MotionEvent.obtain(
+            stickStart, SystemClock.uptimeMillis(), MotionEvent.ACTION_MOVE, 1, props, coords,
+            0, 0, 1f, 1f, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, InputDevice.SOURCE_JOYSTICK, 0,
+        )
+        val ok = send(event)
+        event.recycle()
+        return ok
+    }
+
+    private fun send(event: InputEvent): Boolean = try {
+        inject.invoke(target, event, 0) as? Boolean ?: false // 0 = don't wait
+    } catch (t: Throwable) {
+        false
     }
 }

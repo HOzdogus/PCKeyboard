@@ -11,8 +11,8 @@ android {
         applicationId = "com.hozdogus.pckeyboard"
         minSdk = 33
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
     }
 
     // A fixed key committed to the repo, so every CI build is signed the same

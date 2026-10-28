@@ -26,6 +26,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import kotlin.math.abs
 
@@ -35,6 +36,11 @@ class KeyboardService : Service() {
         const val ACTION_STOP = "com.hozdogus.pckeyboard.STOP"
         const val ACTION_EXPAND = "com.hozdogus.pckeyboard.EXPAND"
         const val ACTION_REBUILD = "com.hozdogus.pckeyboard.REBUILD"
+        /** Re-read the chosen layout and show it. */
+        const val ACTION_RELOAD = "com.hozdogus.pckeyboard.RELOAD"
+        /** Open the on-screen editor for the layout in EXTRA_LAYOUT. */
+        const val ACTION_EDIT = "com.hozdogus.pckeyboard.EDIT"
+        const val EXTRA_LAYOUT = "layout_id"
         private const val CHANNEL_ID = "keyboard"
         private const val NOTIF_ID = 1
         private const val REPEAT_DELAY = 400L
@@ -61,6 +67,9 @@ class KeyboardService : Service() {
     private var wm: WindowManager? = null
 
     private var keyboard: LinearLayout? = null
+    private var custom: CustomOverlay? = null
+    private var editor: Editor? = null
+    private var menu: View? = null
     private var bubble: TextView? = null
     private lateinit var kbParams: WindowManager.LayoutParams
     private lateinit var bubbleParams: WindowManager.LayoutParams
@@ -100,17 +109,15 @@ class KeyboardService : Service() {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         ShizukuLink.addListener(statusListener)
         ShizukuLink.start()
-        if (Prefs.get(this).getBoolean(Prefs.EXPANDED, true)) showKeyboard() else showBubble()
+        if (Prefs.get(this).getBoolean(Prefs.EXPANDED, true)) showActive() else showBubble()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> stopSelf()
-            ACTION_EXPAND -> if (running) showKeyboard()
-            ACTION_REBUILD -> if (running && keyboard != null) {
-                removeKeyboard()
-                showKeyboard()
-            }
+            ACTION_EXPAND -> if (running) showActive()
+            ACTION_REBUILD, ACTION_RELOAD -> if (running && editor == null && bubble == null) showActive()
+            ACTION_EDIT -> if (running) intent?.getStringExtra(EXTRA_LAYOUT)?.let { startEditor(it) }
         }
         return START_NOT_STICKY
     }
@@ -120,7 +127,16 @@ class KeyboardService : Service() {
         // Screen rotated: redraw for the new size and keep everything on screen.
         handler.post {
             if (!running) return@post
-            if (keyboard != null) {
+            val e = editor
+            if (e != null) {
+                // Keep unsaved changes while redrawing for the new screen shape.
+                val working = e.current()
+                e.remove()
+                editor = null
+                openEditor(working)
+            } else if (custom != null) {
+                showActive()
+            } else if (keyboard != null) {
                 removeKeyboard()
                 showKeyboard()
             } else if (bubble != null) {
@@ -135,6 +151,10 @@ class KeyboardService : Service() {
         releaseEverything()
         ShizukuLink.removeListener(statusListener)
         removeKeyboard()
+        removeCustom()
+        removeMenu()
+        editor?.remove()
+        editor = null
         removeBubble()
         super.onDestroy()
     }
@@ -188,8 +208,132 @@ class KeyboardService : Service() {
         layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
     }
 
+    /** Shows whichever layout is chosen: the full keyboard or a custom one. */
+    private fun showActive() {
+        removeMenu()
+        val id = LayoutStore.active(this)
+        val layout = if (id.isNotEmpty()) LayoutStore.find(this, id) else null
+        if (layout == null) {
+            removeCustom()
+            removeKeyboard()
+            showKeyboard()
+        } else {
+            showCustom(layout)
+        }
+    }
+
+    private fun showCustom(layout: CustomLayout) {
+        removeKeyboard()
+        removeBubble()
+        removeCustom()
+        val w = wm ?: return
+        Prefs.get(this).edit().putBoolean(Prefs.EXPANDED, true).apply()
+        val opacity = Prefs.get(this).getInt(Prefs.OPACITY, 92).coerceIn(40, 100) / 100f
+        custom = CustomOverlay(this, w, layout, opacity) { showMenu() }.also { it.show() }
+    }
+
+    private fun removeCustom() {
+        custom?.remove()
+        custom = null
+    }
+
+    private fun startEditor(id: String) {
+        val layout = LayoutStore.find(this, id) ?: return
+        openEditor(layout)
+    }
+
+    private fun openEditor(layout: CustomLayout) {
+        removeMenu()
+        removeKeyboard()
+        removeCustom()
+        removeBubble()
+        editor?.remove()
+        val w = wm ?: return
+        editor = Editor(this, w, layout) { saved ->
+            editor?.remove()
+            editor = null
+            if (saved != null) {
+                LayoutStore.upsert(this, saved)
+                LayoutStore.setActive(this, saved.id)
+            }
+            showActive()
+        }.also { it.show() }
+    }
+
+    // ---------------- menu ----------------
+
+    private fun removeMenu() {
+        menu?.let { try { wm?.removeView(it) } catch (e: Exception) { } }
+        menu = null
+    }
+
+    /** Switch layout, edit, hide or turn off. */
+    private fun showMenu() {
+        if (menu != null) {
+            removeMenu()
+            return
+        }
+        val w = wm ?: return
+        val active = LayoutStore.active(this)
+        val layouts = LayoutStore.load(this)
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(14).toFloat()
+                setColor(Color.argb(245, 14, 18, 24))
+            }
+        }
+        fun item(label: String, highlight: Boolean = false, action: () -> Unit) {
+            list.addView(Win.chip(this, label, if (highlight) cPressed else cKey) { action() })
+            list.addView(Win.gap(this, 1f, 6f))
+        }
+        list.addView(TextView(this).apply {
+            text = "Layouts"
+            setTextColor(cMuted)
+            setPadding(0, 0, 0, dp(6))
+        })
+        item("Full keyboard", active.isEmpty() || layouts.none { it.id == active }) {
+            LayoutStore.setActive(this, "")
+            showActive()
+        }
+        for (l in layouts) {
+            item(l.name, l.id == active) {
+                LayoutStore.setActive(this, l.id)
+                showActive()
+            }
+        }
+        list.addView(Win.gap(this, 1f, 6f))
+        if (layouts.any { it.id == active }) {
+            item("Edit this layout") { startEditor(active) }
+        }
+        item("New layout") {
+            val made = CustomLayout(name = "Layout ${layouts.size + 1}")
+            LayoutStore.upsert(this, made)
+            openEditor(made)
+        }
+        item("Hide (shrink to bubble)") { showBubble() }
+        item("Turn off") { stopSelf() }
+        item("Close menu") { removeMenu() }
+
+        val scroll = ScrollView(this).apply { addView(list) }
+        val screen = Win.screen(w)
+        val width = (screen.width() * 0.8f).toInt().coerceAtMost(dp(320))
+        val params = Win.params(width, WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH).apply {
+            gravity = Gravity.CENTER
+        }
+        scroll.setOnTouchListener { _, e ->
+            if (e.actionMasked == MotionEvent.ACTION_OUTSIDE) removeMenu()
+            false
+        }
+        menu = scroll
+        w.addView(scroll, params)
+    }
+
     private fun showKeyboard() {
         removeBubble()
+        removeCustom()
         if (keyboard != null) return
         val prefs = Prefs.get(this)
         prefs.edit().putBoolean(Prefs.EXPANDED, true).apply()
@@ -216,6 +360,8 @@ class KeyboardService : Service() {
 
     private fun showBubble() {
         removeKeyboard()
+        removeCustom()
+        removeMenu()
         if (bubble != null) return
         val prefs = Prefs.get(this)
         prefs.edit().putBoolean(Prefs.EXPANDED, false).apply()
@@ -286,6 +432,7 @@ class KeyboardService : Service() {
         handle.setOnTouchListener(DragKeyboard())
         statusView = handle
         bar.addView(handle)
+        bar.addView(barButton("☰") { showMenu() })
         bar.addView(barButton("—") { showBubble() })
         bar.addView(barButton("✕") { stopSelf() })
         root.addView(bar)
@@ -577,7 +724,7 @@ class KeyboardService : Service() {
                             .apply()
                     } else {
                         v.performClick()
-                        handler.post { showKeyboard() }
+                        handler.post { showActive() }
                     }
                 }
             }
