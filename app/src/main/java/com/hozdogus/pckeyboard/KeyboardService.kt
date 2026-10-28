@@ -200,8 +200,8 @@ class KeyboardService : Service() {
         val view = buildKeyboard()
         keyboard = view
         wm?.addView(view, kbParams)
-        // Once it has a size, make sure it's fully on screen.
-        view.post { keepKeyboardOnScreen() }
+        // Whenever it's laid out (and so has a real height), make sure it's fully on screen.
+        view.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> keepKeyboardOnScreen() }
         updateStatus()
         relabel()
     }
@@ -596,6 +596,7 @@ class KeyboardService : Service() {
 
     private fun keepKeyboardOnScreen() {
         val root = keyboard ?: return
+        if (root.height == 0) return
         val maxY = (screenHeight() - root.height).coerceAtLeast(0)
         val y = kbParams.y.coerceIn(0, maxY)
         if (y != kbParams.y) {
